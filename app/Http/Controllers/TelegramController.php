@@ -57,10 +57,16 @@ class TelegramController extends Controller
             $this->sendHelpMessage($chatId);
 
 //            $this->sendMessage($chatId, $this->getHelpText());
+        } elseif (strpos($text, '/cmp') === 0 || strpos($text, '/compare') === 0) {
+            $this->handleCompare($chatId, $text);
         } elseif (strpos($text, '/chart') === 0 || strpos($text, '/c') === 0) {
             $this->handleChart($chatId, $text);
         } elseif (strpos($text, '/pie') === 0 || strpos($text, '/p') === 0) {
             $this->handleCategoryPieChart($chatId, $text);
+        }
+
+        elseif (strpos($text, '/last') === 0 || strpos($text, '/l') === 0) {
+            $this->handleLastTransactions($chatId, $text);
         }
         else {
             $this->handleSimpleExpense($chatId, $text);
@@ -72,6 +78,58 @@ class TelegramController extends Controller
     }
 
 
+
+    private function handleLastTransactions($chatId, $text)
+    {
+        $parts = array_filter(explode(' ', $text));
+        array_shift($parts); // Remove /last or /l
+        $parts = array_values($parts);
+
+        if (count($parts) < 1) {
+            $this->sendMessage($chatId, "❌ Format: /last <category> [count]\nExample: /last gaz 10");
+            return;
+        }
+
+        $categoryName = strtolower($parts[0]);
+        $count = isset($parts[1]) && is_numeric($parts[1]) ? intval($parts[1]) : 10;
+
+        if ($count < 1 || $count > 50) {
+            $this->sendMessage($chatId, "❌ Count must be between 1 and 50");
+            return;
+        }
+
+        $category = Category::where('name', 'like', $categoryName . '%')->first();
+
+        if (!$category) {
+            $this->sendMessage($chatId, "❌ Category '$categoryName' not found.\nAvailable expense: " . $this->getCategoryList('expense') . "\nAvailable income: " . $this->getCategoryList('income'));
+            return;
+        }
+
+        $transactions = Transaction::where('category_id', $category->id)
+            ->orderBy('created_at', 'desc')
+            ->limit($count)
+            ->get();
+
+        if ($transactions->isEmpty()) {
+            $this->sendMessage($chatId, "❌ No transactions found for category '" . $category->name . "'.");
+            return;
+        }
+
+        $total = $transactions->sum('amount');
+
+        $message = "📋 *Last " . $transactions->count() . " transactions for " . ucfirst($category->name) . " (" . $category->type . ")*\n\n";
+
+        foreach ($transactions as $index => $transaction) {
+            $date = \Illuminate\Support\Carbon::parse($transaction->created_at)->format('m-d');
+            $amount = number_format($transaction->amount, 2);
+            $note = $transaction->note ?: '-';
+            $message .= ($index + 1) . ". `$date` | IQD $amount | $note\n";
+        }
+
+        $message .= "\n💰 *Total:* IQD " . number_format($total, 2);
+
+        $this->sendMessage($chatId, $message);
+    }
 
     private function handleYearReport($chatId, $text)
     {
@@ -105,6 +163,7 @@ class TelegramController extends Controller
         $totalIncome = $incomes->sum('amount');
         $totalExpense = 0;
         $categoryBreakdown = [];
+        $incomeBreakdown = [];
 
         foreach ($expenses as $categoryName => $transactions) {
             $sum = $transactions->sum('amount');
@@ -112,14 +171,14 @@ class TelegramController extends Controller
             $categoryBreakdown[$categoryName] = $sum;
         }
 
-        // Sort by highest spending
+        foreach ($incomes->groupBy('category.name') as $categoryName => $transactions) {
+            $incomeBreakdown[$categoryName] = $transactions->sum('amount');
+        }
+
         arsort($categoryBreakdown);
+        arsort($incomeBreakdown);
 
-        // Calculate monthly average
-        $monthsElapsed = now()->year == $year
-            ? now()->month
-            : 12;
-
+        $monthsElapsed = now()->year == $year ? now()->month : 12;
         $avgMonthlyIncome = $monthsElapsed > 0 ? $totalIncome / $monthsElapsed : 0;
         $avgMonthlyExpense = $monthsElapsed > 0 ? $totalExpense / $monthsElapsed : 0;
 
@@ -131,6 +190,15 @@ class TelegramController extends Controller
         $message .= "📉 **Monthly Average:**\n";
         $message .= "• Income: IQD " . number_format($avgMonthlyIncome, 2) . "\n";
         $message .= "• Expenses: IQD " . number_format($avgMonthlyExpense, 2) . "\n\n";
+
+        $message .= "💚 **Income Streams:**\n";
+        $rank = 1;
+        foreach ($incomeBreakdown as $category => $amount) {
+            $percentage = $totalIncome > 0 ? ($amount / $totalIncome) * 100 : 0;
+            $message .= "$rank. " . ucfirst($category) . " - IQD " . number_format($amount, 2);
+            $message .= " (" . number_format($percentage, 1) . "%)\n";
+            $rank++;
+        }
 
         $message .= "**Top Spending Categories:**\n";
         $rank = 1;
@@ -205,7 +273,7 @@ class TelegramController extends Controller
         // Get daily expenses
         $expenses = Transaction::where('type', 'expense')
             // no rent
-                ->where('category_id','!=', $parts[1] ?? null)
+            ->where('category_id','!=', $parts[1] ?? null)
 
             ->whereBetween('created_at', [$startDate, $endDate])
             ->selectRaw('DATE(created_at) as date, SUM(amount) as total')
@@ -309,6 +377,251 @@ class TelegramController extends Controller
 
 
 
+    private function handleCompare($chatId, $text)
+    {
+        // Syntax: /cmp salary,bonus vs food,trans,rent !waste [30]
+        // vs is required; ! prefixes excluded expense categories; [days] optional at end
+
+        $raw = trim(preg_replace('/^\/\S+\s*/', '', $text)); // strip command
+
+        // Extract days from end: [30] or just trailing number
+        $days = 30;
+        if (preg_match('/\[?(\d+)\]?\s*$/', $raw, $dm)) {
+            $days = min(max((int)$dm[1], 7), 365);
+            $raw = trim(preg_replace('/\[?\d+\]?\s*$/', '', $raw));
+        }
+
+        // Split by ' vs '
+        if (!str_contains(strtolower($raw), ' vs ')) {
+            $this->sendMessage($chatId,
+                "❌ Format: /cmp <income1,income2> vs <expense1,expense2> [!exclude1] [days]\n" .
+                "Example: `/cmp salary,bonus vs food,trans,rent !waste 30`"
+            );
+            return;
+        }
+
+        [$incomePart, $expensePart] = preg_split('/\s+vs\s+/i', $raw, 2);
+
+        // Parse income categories (up to 5)
+        $incomeNames = array_slice(
+            array_filter(array_map('trim', explode(',', strtolower($incomePart)))),
+            0, 5
+        );
+
+        // Parse expense categories and exclusions
+        $expenseTokens = array_filter(array_map('trim', preg_split('/[\s,]+/', strtolower($expensePart))));
+        $excludeNames = [];
+        $expenseNames = [];
+
+        foreach ($expenseTokens as $token) {
+            if (str_starts_with($token, '!')) {
+                $excludeNames[] = ltrim($token, '!');
+            } else {
+                $expenseNames[] = $token;
+            }
+        }
+        $expenseNames = array_slice($expenseNames, 0, 5);
+
+        if (empty($incomeNames) || empty($expenseNames)) {
+            $this->sendMessage($chatId, "❌ Please provide at least one income and one expense category.");
+            return;
+        }
+
+        // Validate income categories
+        $incomeCategories = Category::where('type', 'income')
+            ->whereIn('name', $incomeNames)
+            ->get()
+            ->keyBy('name');
+
+        $missing = array_diff($incomeNames, $incomeCategories->keys()->toArray());
+        if (!empty($missing)) {
+            $this->sendMessage($chatId,
+                "❌ Income categories not found: " . implode(', ', $missing) . "\n" .
+                "Available income: " . $this->getCategoryList('income')
+            );
+            return;
+        }
+
+        // Validate expense categories
+        $expenseCategories = Category::where('type', 'expense')
+            ->whereIn('name', $expenseNames)
+            ->get()
+            ->keyBy('name');
+
+        $missing = array_diff($expenseNames, $expenseCategories->keys()->toArray());
+        if (!empty($missing)) {
+            $this->sendMessage($chatId,
+                "❌ Expense categories not found: " . implode(', ', $missing) . "\n" .
+                "Available expense: " . $this->getCategoryList('expense')
+            );
+            return;
+        }
+
+        // Resolve exclude IDs
+        $excludeIds = Category::where('type', 'expense')
+            ->whereIn('name', $excludeNames)
+            ->pluck('id')
+            ->toArray();
+
+        $startDate = now()->subDays($days - 1)->startOfDay();
+        $endDate   = now()->endOfDay();
+
+        // ── Build weekly buckets ──────────────────────────────────────────────
+        // For ≤31 days → daily; for >31 → weekly grouping
+        $useWeekly = $days > 31;
+        $buckets   = [];
+
+        if ($useWeekly) {
+            $cursor = $startDate->copy()->startOfWeek();
+            while ($cursor->lte($endDate)) {
+                $buckets[] = $cursor->copy();
+                $cursor->addWeek();
+            }
+            $groupFn = fn($date) => \Carbon\Carbon::parse($date)->startOfWeek()->toDateString();
+            $labelFn = fn(\Carbon\Carbon $d) => $d->format('M d');
+        } else {
+            $cursor = $startDate->copy();
+            while ($cursor->lte($endDate)) {
+                $buckets[] = $cursor->copy();
+                $cursor->addDay();
+            }
+            $groupFn = fn($date) => $date;
+            $labelFn = fn(\Carbon\Carbon $d) => $d->format('M d');
+        }
+
+        $labels = array_map(fn($b) => $labelFn($b), $buckets);
+        $bucketKeys = array_map(fn($b) => $b->toDateString(), $buckets);
+
+        // ── Fetch and aggregate income ────────────────────────────────────────
+        $incomeCatIds = $incomeCategories->pluck('id')->toArray();
+
+        $incomeRaw = Transaction::where('type', 'income')
+            ->whereIn('category_id', $incomeCatIds)
+            ->whereBetween('created_at', [$startDate, $endDate])
+            ->selectRaw('DATE(created_at) as date, SUM(amount) as total')
+            ->groupBy('date')
+            ->pluck('total', 'date')
+            ->toArray();
+
+        // ── Fetch and aggregate expenses ──────────────────────────────────────
+        $expenseCatIds = $expenseCategories->pluck('id')->toArray();
+
+        $expenseQuery = Transaction::where('type', 'expense')
+            ->whereIn('category_id', $expenseCatIds)
+            ->whereBetween('created_at', [$startDate, $endDate]);
+
+        if (!empty($excludeIds)) {
+            $expenseQuery->whereNotIn('category_id', $excludeIds);
+        }
+
+        $expenseRaw = $expenseQuery
+            ->selectRaw('DATE(created_at) as date, SUM(amount) as total')
+            ->groupBy('date')
+            ->pluck('total', 'date')
+            ->toArray();
+
+        // ── Map raw daily data into bucket slots ──────────────────────────────
+        $incomeData  = array_fill_keys($bucketKeys, 0);
+        $expenseData = array_fill_keys($bucketKeys, 0);
+
+        foreach ($incomeRaw as $date => $amount) {
+            $key = $useWeekly
+                ? \Carbon\Carbon::parse($date)->startOfWeek()->toDateString()
+                : $date;
+            if (isset($incomeData[$key])) $incomeData[$key] += $amount;
+        }
+        foreach ($expenseRaw as $date => $amount) {
+            $key = $useWeekly
+                ? \Carbon\Carbon::parse($date)->startOfWeek()->toDateString()
+                : $date;
+            if (isset($expenseData[$key])) $expenseData[$key] += $amount;
+        }
+
+        // ── Build QuickChart config ───────────────────────────────────────────
+        $totalIncome  = array_sum($incomeData);
+        $totalExpense = array_sum($expenseData);
+        $net          = $totalIncome - $totalExpense;
+        $netSymbol    = $net >= 0 ? '+' : '';
+
+        $incomeLabel  = implode(' + ', array_map('ucfirst', $incomeNames));
+        $expenseLabel = implode(' + ', array_map('ucfirst', $expenseNames));
+        if (!empty($excludeNames)) {
+            $expenseLabel .= ' (excl. ' . implode(', ', $excludeNames) . ')';
+        }
+
+        $chartConfig = [
+            'type' => 'bar',
+            'data' => [
+                'labels'   => $labels,
+                'datasets' => [
+                    [
+                        'label'           => $incomeLabel,
+                        'data'            => array_values($incomeData),
+                        'backgroundColor' => 'rgba(29, 158, 117, 0.85)',
+                        'borderColor'     => 'rgba(15, 110, 86, 1)',
+                        'borderWidth'     => 1,
+                    ],
+                    [
+                        'label'           => $expenseLabel,
+                        'data'            => array_values($expenseData),
+                        'backgroundColor' => 'rgba(216, 90, 48, 0.85)',
+                        'borderColor'     => 'rgba(153, 60, 29, 1)',
+                        'borderWidth'     => 1,
+                    ],
+                ],
+            ],
+            'options' => [
+                'title' => [
+                    'display' => true,
+                    'text'    => 'Income vs Expenses — Last ' . $days . ' days',
+                    'fontSize' => 18,
+                ],
+                'legend' => ['display' => true, 'position' => 'top'],
+                'scales' => [
+                    'xAxes' => [['stacked' => false]],
+                    'yAxes' => [[
+                        'stacked'    => false,
+                        'ticks'      => ['beginAtZero' => true],
+                    ]],
+                ],
+            ],
+        ];
+
+        $chartUrl = 'https://quickchart.io/chart?width=900&height=500&backgroundColor=white&c='
+            . urlencode(json_encode($chartConfig));
+
+        try {
+            $response = Http::timeout(15)->get($chartUrl);
+
+            if (!$response->successful()) {
+                $this->sendMessage($chatId, "❌ Failed to generate chart.");
+                return;
+            }
+
+            $tempPath = storage_path('app/temp_compare_chart.png');
+            file_put_contents($tempPath, $response->body());
+
+            // Build caption
+            $period  = $startDate->format('M d') . ' – ' . $endDate->format('M d, Y');
+            $caption = "📊 *Income vs Expenses* — {$days} days\n";
+            $caption .= "📅 {$period}\n\n";
+            $caption .= "💚 *Income* ({$incomeLabel})\n";
+            $caption .= "   IQD " . number_format($totalIncome, 2) . "\n\n";
+            $caption .= "🔴 *Expenses* ({$expenseLabel})\n";
+            $caption .= "   IQD " . number_format($totalExpense, 2) . "\n\n";
+            $caption .= "📈 *Net:* IQD {$netSymbol}" . number_format($net, 2);
+
+            if (!empty($excludeNames)) {
+                $caption .= "\n\n_(excluded: " . implode(', ', $excludeNames) . ")_";
+            }
+
+            $this->sendPhotoFile($chatId, $tempPath, $caption);
+            @unlink($tempPath);
+
+        } catch (\Exception $e) {
+            $this->sendMessage($chatId, "❌ Error: " . $e->getMessage());
+        }
+    }
     private function handleCategoryPieChart($chatId, $text)
     {
         $parts = array_filter(explode(' ', $text));
@@ -517,55 +830,55 @@ class TelegramController extends Controller
             'parse_mode' => 'Markdown',
         ]);
     }    private function handleTransfer($chatId, $text)
-    {
-        // Format: /xfr 100 bank cash or /x 100 bank cash
-        $parts = array_filter(explode(' ', $text));
-        array_shift($parts); // Remove /xfr or /x
-        $parts = array_values($parts);
+{
+    // Format: /xfr 100 bank cash or /x 100 bank cash
+    $parts = array_filter(explode(' ', $text));
+    array_shift($parts); // Remove /xfr or /x
+    $parts = array_values($parts);
 
-        if (count($parts) < 3) {
-            $this->sendMessage($chatId, "❌ Format: /x <amount> <from_account> <to_account>\nExample: /x 100 bank cash");
-            return;
-        }
-
-        $amount = floatval($parts[0]);
-        $fromAccountName = strtolower($parts[1]);
-        $toAccountName = strtolower($parts[2]);
-
-        if ($amount <= 0) {
-            $this->sendMessage($chatId, "❌ Amount must be greater than 0");
-            return;
-        }
-
-        $fromAccount = Account::where('name', $fromAccountName)->first();
-        $toAccount = Account::where('name', $toAccountName)->first();
-
-        if (!$fromAccount) {
-            $this->sendMessage($chatId, "❌ Source account '$fromAccountName' not found. Available: " . $this->listAccounts());
-            return;
-        }
-
-        if (!$toAccount) {
-            $this->sendMessage($chatId, "❌ Destination account '$toAccountName' not found. Available: " . $this->listAccounts());
-            return;
-        }
-
-        if ($fromAccountName === $toAccountName) {
-            $this->sendMessage($chatId, "❌ Cannot transfer to the same account");
-            return;
-        }
-
-        if ($fromAccount->balance < $amount) {
-            $this->sendMessage($chatId, "❌ Insufficient balance in $fromAccountName. Available: IQD " . $fromAccount->balance);
-            return;
-        }
-
-        // Execute transfer
-        $fromAccount->decrement('balance', $amount);
-        $toAccount->increment('balance', $amount);
-
-        $this->sendMessage($chatId, "✅ Transfer successful!\n💰 Amount: IQD $amount\n📤 From: $fromAccountName\n📥 To: $toAccountName");
+    if (count($parts) < 3) {
+        $this->sendMessage($chatId, "❌ Format: /x <amount> <from_account> <to_account>\nExample: /x 100 bank cash");
+        return;
     }
+
+    $amount = floatval($parts[0]);
+    $fromAccountName = strtolower($parts[1]);
+    $toAccountName = strtolower($parts[2]);
+
+    if ($amount <= 0) {
+        $this->sendMessage($chatId, "❌ Amount must be greater than 0");
+        return;
+    }
+
+    $fromAccount = Account::where('name', $fromAccountName)->first();
+    $toAccount = Account::where('name', $toAccountName)->first();
+
+    if (!$fromAccount) {
+        $this->sendMessage($chatId, "❌ Source account '$fromAccountName' not found. Available: " . $this->listAccounts());
+        return;
+    }
+
+    if (!$toAccount) {
+        $this->sendMessage($chatId, "❌ Destination account '$toAccountName' not found. Available: " . $this->listAccounts());
+        return;
+    }
+
+    if ($fromAccountName === $toAccountName) {
+        $this->sendMessage($chatId, "❌ Cannot transfer to the same account");
+        return;
+    }
+
+    if ($fromAccount->balance < $amount) {
+        $this->sendMessage($chatId, "❌ Insufficient balance in $fromAccountName. Available: IQD " . $fromAccount->balance);
+        return;
+    }
+
+    // Execute transfer
+    $fromAccount->decrement('balance', $amount);
+    $toAccount->increment('balance', $amount);
+
+    $this->sendMessage($chatId, "✅ Transfer successful!\n💰 Amount: IQD $amount\n📤 From: $fromAccountName\n📥 To: $toAccountName");
+}
 
     private function handleExpense($chatId, $text)
     {
@@ -618,6 +931,12 @@ class TelegramController extends Controller
     }
 
 
+    /**
+     * @param $chatId
+     * @param $text
+     * @return void
+     * this function handle simple expenses and incomes to cash account, without the need for the the </i /e> <amount> <category> <account>
+     */
     private function handleSimpleExpense($chatId, $text)
     {
         // Format: <amount> <category> [note]
@@ -646,7 +965,10 @@ class TelegramController extends Controller
             return;
         }
 
-        $category = Category::where('name', 'like' , $categoryName .'%')->where('type', 'expense')->first();
+//        $category = Category::where('name', 'like' , $categoryName .'%')->where('type', 'expense')->first();
+
+        $category = Category::where('name', 'like', $categoryName . '%')->first();
+
         $account = Account::where('name', $accountName)->first();
 
         if (!$category) {
@@ -659,14 +981,14 @@ class TelegramController extends Controller
             return;
         }
 
-        if ($account->balance < $amount) {
+        if ($category->type === 'expense' && $account->balance < $amount) {
             $this->sendMessage($chatId, "❌ Insufficient balance in cash account. Available: IQD " . number_format($account->balance, 2));
             return;
         }
 
         // Create transaction
         Transaction::create([
-            'type' => 'expense',
+            'type' => $category->type,
             'category_id' => $category->id,
             'account_id' => $account->id,
             'amount' => $amount,
@@ -674,9 +996,15 @@ class TelegramController extends Controller
         ]);
 
         // Update account balance
-        $account->decrement('balance', $amount);
 
-        $this->sendMessage($chatId, "✅ Expense recorded!\n💰 $categoryName: IQD " . number_format($amount, 2) . "\n📍 From: cash\n📝 Note: " . ($note ?: 'N/A'));
+        if ($category->type === 'expense') {
+            $account->decrement('balance', $amount);
+            $emoji = '✅ Expense recorded!';
+        } else {
+            $account->increment('balance', $amount);
+            $emoji = '✅ Income recorded!';
+        }
+        $this->sendMessage($chatId, "$emoji\n💰 $categoryName: IQD " . number_format($amount, 2) . "\n📍 Account: cash\n📝 Note: " . ($note ?: 'N/A'));
     }
     private function handleIncome($chatId, $text)
     {
@@ -904,7 +1232,7 @@ class TelegramController extends Controller
     {
         return implode(', ', Account::pluck('name')->toArray());
     }
- 
+
 
     private function sendHelpMessage($chatId)
     {
@@ -948,6 +1276,14 @@ class TelegramController extends Controller
             "/cat <type> <name>\n" .
             "  Add new category\n" .
             "  Example: `/cat expense groceries`\n\n" .
+
+            "*Income vs Expense Compare:*\n" .
+            "/cmp <income> vs <expense> [!exclude] [days]\n" .
+            "  Example: `/cmp salary,taxi vs gaz,cafe,carWash,restaurant,trans,waste !rent 120`\n\n" .
+            "*Transaction History:*\n" .
+            "/last <category> [count]\n" .
+            "  Show last N transactions for a category\n" .
+            "  Example: `/last gaz 10` or `/last food`\n\n" .
 
             "/h - Show this help message";
 
