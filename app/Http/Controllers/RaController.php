@@ -6,7 +6,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 
-class RaBotController extends Controller
+class RaController extends Controller
 {
     private $telegramToken;
     private $allowedUsers;

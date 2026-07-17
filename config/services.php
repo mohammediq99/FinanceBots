@@ -43,6 +43,11 @@ return [
         'allowed_users' => env('TELEGRAM_GOLD_ALLOWED_USERS'),
     ],
 
+
+    'telegram_plan' => [
+        'token'         => env('TELEGRAM_PLAN_BOT_TOKEN'),
+        'allowed_users' => env('TELEGRAM_PLAN_BOT_ALLOWED_USERS', ''),
+    ],
     'gold_api' => [
         'key' => env('MASSIVE_API_KEY'),
     ],

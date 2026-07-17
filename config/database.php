@@ -63,6 +63,22 @@ return [
             ]) : [],
         ],
 
+        'daftari' => [
+            'driver'         => 'mysql',
+            'url'            => env('DB_DAFTARI_URL'),
+            'host'           => env('DB_DAFTARI_HOST', '127.0.0.1'),
+            'port'           => env('DB_DAFTARI_PORT', '3306'),
+            'database'       => env('DB_DAFTARI_DATABASE', 'daftari'),
+            'username'       => env('DB_DAFTARI_USERNAME', 'forge'),
+            'password'       => env('DB_DAFTARI_PASSWORD', ''),
+            'unix_socket'    => env('DB_DAFTARI_SOCKET', ''),
+            'charset'        => 'utf8mb4',
+            'collation'      => 'utf8mb4_unicode_ci',
+            'prefix'         => '',
+            'prefix_indexes' => true,
+            'strict'         => true,
+            'engine'         => null,
+        ],
         'mariadb' => [
             'driver' => 'mariadb',
             'url' => env('DB_URL'),
