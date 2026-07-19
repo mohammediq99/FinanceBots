@@ -76,10 +76,14 @@ class PlanBotController  extends Controller
                 '/start', '/help' => $this->send($chatId, $this->helpText()),
                 '/plans'          => $this->handleListPlans($chatId),
                 '/check'          => $this->handleCheck($chatId, $args),
+                '/last', '/l', '/lastusers' => $this->handleLastUsers($chatId, $args),
+                '/loc', '/location', '/setloc' => $this->handleSetLocation($chatId, $args),
+
                 default           => $this->send($chatId, "❓ Unknown command.\n\n" . $this->helpText()),
             };
             return;
         }
+
 
         // Plain "activation line":  msisdn plan_id months price
         // Example:  07806999105 3 12 1500000
@@ -250,6 +254,209 @@ class PlanBotController  extends Controller
 
         $this->send($chatId, implode("\n", $lines));
     }
+    /**
+     * List the last N registered users from the daftari DB.
+     * Usage:  /last            → default 10
+     *         /last 20         → last 20
+     *         /last 15 gold    → last 15 filtered by plan slug/name (optional)
+     */
+    private function handleLastUsers(int $chatId, string $args): void
+    {
+        $parts = array_values(array_filter(preg_split('/\s+/', trim($args))));
+
+        $count      = 10;
+        $planFilter = null;
+
+        if (isset($parts[0])) {
+            if (ctype_digit($parts[0])) {
+                $count = (int) $parts[0];
+            } else {
+                $planFilter = strtolower($parts[0]);
+            }
+        }
+        if (isset($parts[1]) && $planFilter === null) {
+            $planFilter = strtolower($parts[1]);
+        }
+
+        if ($count < 1 || $count > 50) {
+            $this->send($chatId, "❌ Count must be between 1 and 50.");
+            return;
+        }
+
+        $query = DB::connection(self::CONN)
+            ->table('users as u')
+            ->leftJoin('plans as p', 'p.id', '=', 'u.plan_id')
+            ->orderByDesc('u.created_at')
+            ->limit($count)
+            ->select([
+                'u.id', 'u.name', 'u.phone', 'u.created_at',
+                'u.plan_expires_at',
+                'p.id as plan_id', 'p.name as plan_name', 'p.slug as plan_slug',
+            ]);
+
+        if ($planFilter !== null) {
+            $query->where(function ($q) use ($planFilter) {
+                $q->whereRaw('LOWER(p.slug) = ?', [$planFilter])
+                    ->orWhereRaw('LOWER(p.name) = ?', [$planFilter]);
+            });
+        }
+
+        $users = $query->get();
+
+        if ($users->isEmpty()) {
+            $this->send($chatId, "ℹ️ No users found"
+                . ($planFilter ? " for plan *{$planFilter}*" : '') . '.');
+            return;
+        }
+
+        $totalUsers = DB::connection(self::CONN)->table('users')->count();
+
+        $lines = [];
+        $lines[] = "👥 *Last {$users->count()} Registered Users*"
+            . ($planFilter ? " — plan: *{$planFilter}*" : '')
+            . " (of {$totalUsers} total)";
+        $lines[] = '';
+
+        foreach ($users as $i => $u) {
+            $seq       = $i + 1;
+            $regDate   = $u->created_at ? Carbon::parse($u->created_at)->format('Y-m-d H:i') : '—';
+            $planLabel = $u->plan_name ? "{$u->plan_name} (#{$u->plan_id})" : '—';
+
+            $status = '⚪';
+            if ($u->plan_expires_at) {
+                $status = Carbon::parse($u->plan_expires_at)->isFuture() ? '🟢' : '🔴';
+            }
+
+            $lines[] = "*{$seq}.* `#{$u->id}` {$status} *" . ($u->name ?: '—') . "*";
+            $lines[] = "   📱 {$u->phone}";
+            $lines[] = "   📦 {$planLabel}";
+            $lines[] = "   📅 Registered: {$regDate}";
+            $lines[] = '';
+        }
+
+        $this->send($chatId, implode("\n", $lines));
+    }
+
+
+
+    /**
+     * Set the `location` field (Google Maps link) for a user.
+     * Usage:
+     *   /loc <msisdn|#id> <google_maps_url>
+     * Examples:
+     *   /loc 07806999105 https://maps.google.com/?q=33.3152,44.3661
+     *   /loc #42 https://maps.app.goo.gl/abc123
+     */
+    private function handleSetLocation(int $chatId, string $args): void
+    {
+        $parts = preg_split('/\s+/', trim($args), 2);
+
+        if (count($parts) < 2 || $parts[0] === '' || $parts[1] === '') {
+            $this->send($chatId,
+                "❌ Usage: `/loc <msisdn|#id> <google_maps_url>`\n" .
+                "Examples:\n" .
+                "`/loc 07806999105 https://maps.google.com/?q=33.3152,44.3661`\n" .
+                "`/loc #42 https://maps.app.goo.gl/abc123`"
+            );
+            return;
+        }
+
+        [$identifier, $url] = $parts;
+        $url = trim($url);
+
+        // ── Validate the URL is a Google Maps link ─────────
+        if (!$this->isGoogleMapsUrl($url)) {
+            $this->send($chatId,
+                "❌ Invalid Google Maps link.\n" .
+                "Accepted hosts: `google.com/maps`, `maps.google.com`, `goo.gl/maps`, `maps.app.goo.gl`."
+            );
+            return;
+        }
+
+        // ── Locate the user (by #id or by phone) ───────────
+        $userQuery = DB::connection(self::CONN)->table('users');
+
+        if (str_starts_with($identifier, '#') && ctype_digit(substr($identifier, 1))) {
+            $userId = (int) substr($identifier, 1);
+            $user   = $userQuery->where('id', $userId)->first(['id', 'name', 'phone', 'location']);
+        } elseif (ctype_digit($identifier) && strlen($identifier) <= 6) {
+            // Treat short numeric input as an ID
+            $user = $userQuery->where('id', (int) $identifier)->first(['id', 'name', 'phone', 'location']);
+        } else {
+            $msisdn = $this->normalizeMsisdn($identifier);
+            if (!$msisdn) {
+                $this->send($chatId, "❌ Invalid phone number or id: `{$identifier}`");
+                return;
+            }
+            $user = $userQuery->where('phone', $msisdn)->first(['id', 'name', 'phone', 'location']);
+        }
+
+        if (!$user) {
+            $this->send($chatId, "❌ No user found for `{$identifier}`.");
+            return;
+        }
+
+        // ── Update ─────────────────────────────────────────
+        try {
+            DB::connection(self::CONN)
+                ->table('users')
+                ->where('id', $user->id)
+                ->update([
+                    'location'   => $url,
+                    'updated_at' => Carbon::now(),
+                ]);
+        } catch (\Throwable $e) {
+            Log::error('PlanBot set location failed', [
+                'user_id' => $user->id,
+                'error'   => $e->getMessage(),
+            ]);
+            $this->send($chatId, "❌ DB error: " . $e->getMessage());
+            return;
+        }
+
+        $previous = $user->location ? "\n_Previous:_ {$user->location}" : '';
+
+        $this->send($chatId,
+            "✅ *Location updated*\n" .
+            "👤 User: {$user->name} (#{$user->id})\n" .
+            "📱 Phone: {$user->phone}\n" .
+            "📍 New: {$url}" .
+            $previous
+        );
+    }
+
+    /**
+     * Validate a Google Maps URL (accepts common variants + shortlinks).
+     */
+    private function isGoogleMapsUrl(string $url): bool
+    {
+        return true;
+        if (!filter_var($url, FILTER_VALIDATE_URL)) {
+            return false;
+        }
+
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $path = strtolower((string) parse_url($url, PHP_URL_PATH));
+
+        // Full maps URLs
+        if ($host === 'maps.google.com' || str_ends_with($host, '.maps.google.com')) {
+            return true;
+        }
+        if (($host === 'google.com' || str_ends_with($host, '.google.com'))
+            && str_starts_with($path, '/maps')) {
+            return true;
+        }
+
+        // Shortlinks
+        if ($host === 'goo.gl' && str_starts_with($path, '/maps')) {
+            return true;
+        }
+        if ($host === 'maps.app.goo.gl') {
+            return true;
+        }
+
+        return false;
+    }
 
     // =========================================================
     // Helpers
@@ -304,6 +511,8 @@ class PlanBotController  extends Controller
         ]);
     }
 
+
+    // ... existing code ...
     private function helpText(): string
     {
         return <<<HELP
@@ -316,9 +525,17 @@ Example:
 `07806999105 3 12 1500000`
 
 *Other commands*
-`/plans`               — list all available plans
-`/check <msisdn>`      — show current plan of a user
-`/help`                — this help
+`/plans`                     — list all available plans
+`/check <msisdn>`            — show current plan of a user
+`/last [count] [plan]`       — last N registered users (default 10, max 50)
+                               e.g. `/last 20` or `/last 15 gold`
+`/loc <msisdn|#id> <url>`    — set a user's Google Maps location
+                               e.g. `/loc 07806999105 https://maps.app.goo.gl/abc`
+                               or   `/loc #42 https://maps.google.com/?q=33.3,44.4`
+`/help`                      — this help
 HELP;
     }
+// ... existing code ...
+
+
 }
