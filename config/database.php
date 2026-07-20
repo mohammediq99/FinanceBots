@@ -79,6 +79,18 @@ return [
             'strict'         => true,
             'engine'         => null,
         ],
+        // config/database.php → connections
+        'daftari_bot' => [
+            'driver'    => 'mysql',
+            'host'      => env('DAFTARI_DB_HOST'),
+            'port'      => env('DAFTARI_DB_PORT', '3306'),
+            'database'  => 'daftari_bot',
+            'username'  => env('DAFTARI_DB_USERNAME'),
+            'password'  => env('DAFTARI_DB_PASSWORD'),
+            'charset'   => 'utf8mb4',
+            'collation' => 'utf8mb4_unicode_ci',
+            'strict'    => false,
+        ],
         'mariadb' => [
             'driver' => 'mariadb',
             'url' => env('DB_URL'),
