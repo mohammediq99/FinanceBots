@@ -6,6 +6,7 @@ use App\Models\Account;
 use App\Models\Category;
 use App\Models\Transaction;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 
 class TelegramController extends Controller
@@ -49,8 +50,14 @@ class TelegramController extends Controller
             $this->handleReport($chatId, $text);
         }  elseif (strpos($text, '/Yr') === 0 || strpos($text, '/yr') === 0  || strpos($text, 'Yr') === 0  || strpos($text, 'yr') === 0  ) {
             $this->handleYearReport($chatId, $text  );
-        } elseif (strpos($text, '/cat') === 0) {
+        }
+        elseif (strpos($text, '/tbl') === 0 || strpos($text, '/mtx') === 0) {
+            $this->handleMatrixReport($chatId, $text);
+        }
+        elseif (strpos($text, '/cat') === 0) {
             $this->handleAddCategory($chatId, $text);
+        } elseif (strpos($text, '/xh') === 0) {
+            $this->handleTransferHistory($chatId, $text);
         } elseif (strpos($text, '/xfr') === 0 || strpos($text, '/x') === 0) {
             $this->handleTransfer($chatId, $text);
         } elseif (strpos($text, '/start') === 0 || strpos($text, '/help') === 0 || strpos($text, '/h') === 0) {
@@ -79,6 +86,94 @@ class TelegramController extends Controller
 
 
 
+    private function handleMatrixReport($chatId, $text)
+    {
+        $parts = array_values(array_filter(explode(' ', $text)));
+        array_shift($parts);
+        $year = $parts[0] ?? now()->year;
+
+        if (!is_numeric($year) || $year < 2000 || $year > 2100) {
+            $this->sendMessage($chatId, "❌ Format: /tbl [year]\nExample: /tbl 2026");
+            return;
+        }
+
+        $start = \Carbon\Carbon::createFromDate($year, 1, 1)->startOfDay();
+        $end   = \Carbon\Carbon::createFromDate($year, 12, 31)->endOfDay();
+
+        $rows = Transaction::selectRaw('type, MONTH(created_at) as m, SUM(amount) as total')
+            ->whereBetween('created_at', [$start, $end])
+            ->groupBy('type', 'm')
+            ->get();
+
+        $income  = array_fill(1, 12, 0);
+        $expense = array_fill(1, 12, 0);
+
+        foreach ($rows as $r) {
+            if ($r->type === 'income')  $income[$r->m]  = (float) $r->total;
+            if ($r->type === 'expense') $expense[$r->m] = (float) $r->total;
+        }
+
+        $months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+        $columns = [['title' => 'Item', 'dataIndex' => 'label']];
+        foreach ($months as $i => $name) {
+            $columns[] = ['title' => $name, 'dataIndex' => 'm' . ($i + 1)];
+        }
+        $columns[] = ['title' => 'Total', 'dataIndex' => 'total'];
+
+        $incomeRow  = ['label' => 'Income'];
+        $expenseRow = ['label' => 'Expenses'];
+        $saveRow    = ['label' => 'Savings'];
+
+        $tIncome = 0; $tExpense = 0;
+        foreach (range(1, 12) as $i) {
+            $inc = $income[$i];
+            $exp = $expense[$i];
+            $tIncome  += $inc;
+            $tExpense += $exp;
+            $incomeRow['m' . $i]  = number_format($inc, 0);
+            $expenseRow['m' . $i] = number_format($exp, 0);
+            $saveRow['m' . $i]    = number_format($inc - $exp, 0);
+        }
+        $incomeRow['total']  = number_format($tIncome, 0);
+        $expenseRow['total'] = number_format($tExpense, 0);
+        $saveRow['total']    = number_format($tIncome - $tExpense, 0);
+
+        $config = [
+            'title'      => "Yearly Report $year",
+            'columns'    => $columns,
+            'dataSource' => [$incomeRow, $expenseRow, $saveRow],
+        ];
+
+        $payload = [
+            'data'            => $config,
+            'width'           => 1400,
+            'height'          => 220,
+            'backgroundColor' => 'white',
+        ];
+
+        try {
+            $response = Http::timeout(20)->post('https://api.quickchart.io/v1/table', $payload);
+
+            if (!$response->successful()) {
+                $this->sendMessage($chatId, "❌ Failed to generate table.\n" . $response->status() . ": " . mb_substr($response->body(), 0, 300));
+                return;
+            }
+
+            $tempPath = storage_path('app/temp_matrix.png');
+            file_put_contents($tempPath, $response->body());
+
+            $caption  = "📊 *Yearly Report $year*\n";
+            $caption .= "💵 Income: IQD " . number_format($tIncome, 0) . "\n";
+            $caption .= "💸 Expenses: IQD " . number_format($tExpense, 0) . "\n";
+            $caption .= "📈 Savings: IQD " . number_format($tIncome - $tExpense, 0);
+
+            $this->sendPhotoFile($chatId, $tempPath, $caption);
+            @unlink($tempPath);
+        } catch (\Exception $e) {
+            $this->sendMessage($chatId, "❌ Error: " . $e->getMessage());
+        }
+    }
     private function handleLastTransactions($chatId, $text)
     {
         $parts = array_filter(explode(' ', $text));
@@ -829,56 +924,122 @@ class TelegramController extends Controller
             'caption' => $caption,
             'parse_mode' => 'Markdown',
         ]);
-    }    private function handleTransfer($chatId, $text)
-{
-    // Format: /xfr 100 bank cash or /x 100 bank cash
-    $parts = array_filter(explode(' ', $text));
-    array_shift($parts); // Remove /xfr or /x
-    $parts = array_values($parts);
-
-    if (count($parts) < 3) {
-        $this->sendMessage($chatId, "❌ Format: /x <amount> <from_account> <to_account>\nExample: /x 100 bank cash");
-        return;
     }
 
-    $amount = floatval($parts[0]);
-    $fromAccountName = strtolower($parts[1]);
-    $toAccountName = strtolower($parts[2]);
+    private function handleTransfer($chatId, $text)
+    {
+        // Format: /xfr 100 bank cash [note] or /x 100 bank cash [note]
+        $parts = array_filter(explode(' ', $text));
+        array_shift($parts); // Remove /xfr or /x
+        $parts = array_values($parts);
 
-    if ($amount <= 0) {
-        $this->sendMessage($chatId, "❌ Amount must be greater than 0");
-        return;
+        if (count($parts) < 3) {
+            $this->sendMessage($chatId, "❌ Format: /x <amount> <from> <to> [note]\nExample: /x 100 bank cash savings");
+            return;
+        }
+
+        $amount = floatval($parts[0]);
+        $fromAccountName = strtolower($parts[1]);
+        $toAccountName = strtolower($parts[2]);
+        $note = isset($parts[3]) ? implode(' ', array_slice($parts, 3)) : null;
+
+        if ($amount <= 0) {
+            $this->sendMessage($chatId, "❌ Amount must be greater than 0");
+            return;
+        }
+
+        $fromAccount = Account::where('name', $fromAccountName)->first();
+        $toAccount = Account::where('name', $toAccountName)->first();
+
+        if (!$fromAccount) {
+            $this->sendMessage($chatId, "❌ Source account '$fromAccountName' not found. Available: " . $this->listAccounts());
+            return;
+        }
+
+        if (!$toAccount) {
+            $this->sendMessage($chatId, "❌ Destination account '$toAccountName' not found. Available: " . $this->listAccounts());
+            return;
+        }
+
+        if ($fromAccountName === $toAccountName) {
+            $this->sendMessage($chatId, "❌ Cannot transfer to the same account");
+            return;
+        }
+
+        if ($fromAccount->balance < $amount) {
+            $this->sendMessage($chatId, "❌ Insufficient balance in $fromAccountName. Available: IQD " . $fromAccount->balance);
+            return;
+        }
+
+        try {
+            DB::transaction(function () use ($fromAccount, $toAccount, $amount, $note) {
+                $fromAccount->decrement('balance', $amount);
+                $toAccount->increment('balance', $amount);
+
+                Transaction::create([
+                    'type'          => 'transfer',
+                    'category_id'   => null,
+                    'account_id'    => $fromAccount->id,
+                    'to_account_id' => $toAccount->id,
+                    'amount'        => $amount,
+                    'note'          => $note,
+                ]);
+            });
+        } catch (\Throwable $e) {
+            $this->sendMessage($chatId, "❌ Transfer failed: " . $e->getMessage());
+            return;
+        }
+
+        $this->sendMessage($chatId,
+            "✅ Transfer recorded!\n" .
+            "💰 Amount: IQD " . number_format($amount, 2) . "\n" .
+            "📤 From: $fromAccountName  →  📥 To: $toAccountName\n" .
+            "📝 Note: " . ($note ?: 'N/A')
+        );
     }
 
-    $fromAccount = Account::where('name', $fromAccountName)->first();
-    $toAccount = Account::where('name', $toAccountName)->first();
+    private function handleTransferHistory($chatId, $text)
+    {
+        // Format: /xh [count]
+        $parts = array_filter(explode(' ', $text));
+        array_shift($parts); // Remove /xh
+        $parts = array_values($parts);
 
-    if (!$fromAccount) {
-        $this->sendMessage($chatId, "❌ Source account '$fromAccountName' not found. Available: " . $this->listAccounts());
-        return;
+        $count = isset($parts[0]) && is_numeric($parts[0]) ? intval($parts[0]) : 10;
+
+        if ($count < 1 || $count > 50) {
+            $this->sendMessage($chatId, "❌ Count must be between 1 and 50");
+            return;
+        }
+
+        $transfers = Transaction::where('type', 'transfer')
+            ->with(['account', 'toAccount'])
+            ->orderBy('created_at', 'desc')
+            ->limit($count)
+            ->get();
+
+        if ($transfers->isEmpty()) {
+            $this->sendMessage($chatId, "❌ No transfers found.");
+            return;
+        }
+
+        $total = $transfers->sum('amount');
+
+        $message = "🔁 *Last " . $transfers->count() . " transfers*\n\n";
+
+        foreach ($transfers as $index => $t) {
+            $date = \Illuminate\Support\Carbon::parse($t->created_at)->format('m-d');
+            $amount = number_format($t->amount, 2);
+            $from = $t->account ? ucfirst($t->account->name) : '—';
+            $to = $t->toAccount ? ucfirst($t->toAccount->name) : '—';
+            $note = $t->note ?: '-';
+            $message .= ($index + 1) . ". `$date` | IQD $amount | $from → $to | $note\n";
+        }
+
+        $message .= "\n💰 *Total transferred:* IQD " . number_format($total, 2);
+
+        $this->sendMessage($chatId, $message);
     }
-
-    if (!$toAccount) {
-        $this->sendMessage($chatId, "❌ Destination account '$toAccountName' not found. Available: " . $this->listAccounts());
-        return;
-    }
-
-    if ($fromAccountName === $toAccountName) {
-        $this->sendMessage($chatId, "❌ Cannot transfer to the same account");
-        return;
-    }
-
-    if ($fromAccount->balance < $amount) {
-        $this->sendMessage($chatId, "❌ Insufficient balance in $fromAccountName. Available: IQD " . $fromAccount->balance);
-        return;
-    }
-
-    // Execute transfer
-    $fromAccount->decrement('balance', $amount);
-    $toAccount->increment('balance', $amount);
-
-    $this->sendMessage($chatId, "✅ Transfer successful!\n💰 Amount: IQD $amount\n📤 From: $fromAccountName\n📥 To: $toAccountName");
-}
 
     private function handleExpense($chatId, $text)
     {
@@ -958,7 +1119,17 @@ class TelegramController extends Controller
         $amount = floatval($parts[0]);
         $categoryName = strtolower($parts[1]);
         $accountName = 'cash'; // Default to cash account
-        $note = implode(' ', array_slice($parts, 2)) ?: null;
+        $noteStartIndex = 2;
+
+        if (isset($parts[2])) {
+            $candidateAccount = strtolower($parts[2]);
+            if (Account::where('name', $candidateAccount)->exists()) {
+                $accountName = $candidateAccount;
+                $noteStartIndex = 3;
+            }
+        }
+
+        $note = implode(' ', array_slice($parts, $noteStartIndex)) ?: null;
 
         if ($amount <= 0) {
             $this->sendMessage($chatId, "❌ Amount must be greater than 0");
@@ -1004,7 +1175,7 @@ class TelegramController extends Controller
             $account->increment('balance', $amount);
             $emoji = '✅ Income recorded!';
         }
-        $this->sendMessage($chatId, "$emoji\n💰 $categoryName: IQD " . number_format($amount, 2) . "\n📍 Account: cash\n📝 Note: " . ($note ?: 'N/A'));
+        $this->sendMessage($chatId, "$emoji\n💰 $categoryName: IQD " . number_format($amount, 2) . "\n📍 Account: $accountName\n📝 Note: " . ($note ?: 'N/A'));
     }
     private function handleIncome($chatId, $text)
     {
@@ -1251,9 +1422,13 @@ class TelegramController extends Controller
             "  Record income\n" .
             "  Example: `/i 500 salary bank`\n\n" .
 
-            "/x <amount> <from> <to>\n" .
-            "  Transfer between accounts\n" .
-            "  Example: `/x 100 bank cash`\n\n" .
+            "/x <amount> <from> <to> [note]\n" .
+            "  Transfer between accounts (with optional note)\n" .
+            "  Example: `/x 100 bank cash savings buffer`\n\n" .
+
+            "/xh [count]\n" .
+            "  Show last N transfers (default 10, max 50)\n" .
+            "  Example: `/xh 20`\n\n" .
 
             "*Balance & Reports:*\n" .
             "/b - Show all account balances\n\n" .
@@ -1264,6 +1439,10 @@ class TelegramController extends Controller
 
             "/yr [year] - Yearly report\n" .
             "  Example: `/yr 2025` or `/yr`\n\n" .
+
+
+            "/tbl [year] - Yearly matrix table (image)\n" .
+            "  Example: `/tbl 2026` or `/tbl`\n\n" .
 
             "*Charts:*\n" .
             "/c [days] - Expenses & balance chart\n" .

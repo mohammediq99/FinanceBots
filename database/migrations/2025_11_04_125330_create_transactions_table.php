@@ -13,9 +13,10 @@ return new class extends Migration
     {
         Schema::create('transactions', function (Blueprint $table) {
             $table->id();
-            $table->enum('type', ['income', 'expense']);
+            $table->enum('type', ['income', 'expense','transfer']);
             $table->foreignId('category_id')->constrained('categories')->onDelete('cascade');
-            $table->foreignId('account_id')->constrained('accounts')->onDelete('cascade');
+            $table->foreignId('account_id')->constrained('accounts')->onDelete('set null');
+            $table->bigInt('to_account_id')->constrained('accounts')->onDelete('set null');
             $table->decimal('amount', 12, 2);
             $table->text('note')->nullable();
             $table->timestamp('created_at')->useCurrent();
