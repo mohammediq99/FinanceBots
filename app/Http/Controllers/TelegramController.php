@@ -1088,7 +1088,15 @@ class TelegramController extends Controller
         // Update account balance
         $account->decrement('balance', $amount);
 
-        $this->sendMessage($chatId, "✅ Expense recorded!\n💰 $categoryName: IQD $amount\n📍 From: $accountName\n📝 Note: " . ($note ?: 'N/A'));
+        $account->refresh();
+
+        $this->sendMessage($chatId,
+            "✅ Expense recorded!\n" .
+            "💰 $categoryName: IQD " . number_format($amount, 2) . "\n" .
+            "📍 From: $accountName\n" .
+            "💳 Remaining in $accountName: IQD " . number_format($account->balance, 2) . "\n" .
+            "📝 Note: " . ($note ?: 'N/A')
+        );
     }
 
 
@@ -1175,7 +1183,19 @@ class TelegramController extends Controller
             $account->increment('balance', $amount);
             $emoji = '✅ Income recorded!';
         }
-        $this->sendMessage($chatId, "$emoji\n💰 $categoryName: IQD " . number_format($amount, 2) . "\n📍 Account: $accountName\n📝 Note: " . ($note ?: 'N/A'));
+        $account->refresh();
+
+
+        $balanceLabel = $category->type === 'expense' ? '💳 Remaining' : '💳 New balance';
+
+        $this->sendMessage($chatId,
+            "$emoji\n" .
+            "💰 $categoryName: IQD " . number_format($amount, 2) . "\n" .
+            "📍 Account: $accountName\n" .
+            "$balanceLabel in $accountName: IQD " . number_format($account->balance, 2) . "\n" .
+            "📝 Note: " . ($note ?: 'N/A')
+        );
+
     }
     private function handleIncome($chatId, $text)
     {
