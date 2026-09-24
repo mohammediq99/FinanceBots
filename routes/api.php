@@ -5,6 +5,7 @@ use App\Http\Controllers\TelegramController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\GoldBotController;
 use App\Http\Controllers\PlanBotController;
+use App\Http\Controllers\PublisherBotController;
 
 Route::post('/telegram/webhook', [TelegramController::class, 'webhook']);
 //Route::post('/ra-bot/webhook', [RaBotController::class, 'webhook']);
@@ -18,3 +19,5 @@ Route::prefix('bot')->group(function () {
     Route::any('/plan/webhook', [PlanBotController::class, 'webhook']);
 
 });
+
+Route::post('/publisher-bot/webhook', [PublisherBotController::class, 'webhook']);

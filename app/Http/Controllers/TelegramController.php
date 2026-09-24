@@ -1186,14 +1186,18 @@ class TelegramController extends Controller
         $account->refresh();
 
 
+
         $balanceLabel = $category->type === 'expense' ? '💳 Remaining' : '💳 New balance';
+        $warning = $this->getCategoryLimitWarning($category);
 
         $this->sendMessage($chatId,
             "$emoji\n" .
             "💰 $categoryName: IQD " . number_format($amount, 2) . "\n" .
             "📍 Account: $accountName\n" .
             "$balanceLabel in $accountName: IQD " . number_format($account->balance, 2) . "\n" .
-            "📝 Note: " . ($note ?: 'N/A')
+            "📝 Note: " . ($note ?: 'N/A') .
+            $warning
+
         );
 
     }
@@ -1417,6 +1421,34 @@ class TelegramController extends Controller
             $query->where('type', $type);
         }
         return implode(', ', $query->pluck('name')->toArray());
+    }
+
+    private function getCategoryLimitWarning($category): string
+    {
+        if (empty($category->monthly_limit) || $category->monthly_limit <= 0) {
+            return '';
+        }
+
+        $spent = Transaction::where('type', 'expense')
+            ->where('category_id', $category->id)
+            ->where('created_at', '>=', now()->subDays(30))
+            ->sum('amount');
+
+        if ($spent <= $category->monthly_limit) {
+            $remaining = $category->monthly_limit - $spent;
+            return "\n\n📊 30d spent: IQD " . number_format($spent, 2)
+                . " / " . number_format($category->monthly_limit, 2)
+                . "\n✅ Remaining: IQD " . number_format($remaining, 2);
+        }
+
+        $over = $spent - $category->monthly_limit;
+        $percent = ($spent / $category->monthly_limit) * 100;
+
+        return "\n\n⚠️ *WARNING: Monthly limit exceeded!*"
+            . "\n📊 30d spent: IQD " . number_format($spent, 2)
+            . " / " . number_format($category->monthly_limit, 2)
+            . "\n🔴 Over by: IQD " . number_format($over, 2)
+            . " (" . number_format($percent, 1) . "%)";
     }
 
     private function listAccounts()

@@ -52,4 +52,23 @@ return [
         'key' => env('MASSIVE_API_KEY'),
     ],
 
+    'youtube' => [
+        'client_id'     => env('YOUTUBE_CLIENT_ID'),
+        'client_secret' => env('YOUTUBE_CLIENT_SECRET'),
+        'refresh_token' => env('YOUTUBE_REFRESH_TOKEN'),
+    ],
+
+    'facebook' => [
+        'page_id'      => env('FB_PAGE_ID'),
+        'access_token' => env('FB_PAGE_ACCESS_TOKEN'),
+    ],
+
+    'instagram' => [
+        'ig_user_id'   => env('IG_USER_ID'),
+        'access_token' => env('IG_ACCESS_TOKEN'),
+    ],
+
+    'tiktok' => [
+        'access_token' => env('TIKTOK_ACCESS_TOKEN'),
+    ],
 ];
